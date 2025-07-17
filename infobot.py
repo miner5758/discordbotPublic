@@ -25,6 +25,12 @@ SPREADSHEET_ID = "1oXxHr3n1uGL2ZPcMDFiVFUQKASmQ4k5WMTlbJhrbCbI"
 # Renamed from SAMPLE_RANGE_NAME
 RANGE_NAME = "A2:E"
 
+url_pattern = re.compile(
+        r'https?://[^\s/$.?#].[^\s]*'  # Matches http:// or https:// followed by non-whitespace
+        r'|www\.[^\s/$.?#].[^\s]*'     # Matches www. followed by non-whitespace
+        r'|[a-zA-Z0-9]+\.[a-zA-Z0-9]+\.[a-zA-Z]{2,}' # Matches domain.tld or sub.domain.tld
+    )
+
 def sheetsedit(dataa):
     """Appends a row of data to a Google Sheet."""
     creds = None
@@ -116,11 +122,7 @@ def is_link(text):
     # 3. A word character sequence followed by a dot, then another word character
     #    sequence, and at least one more dot and a TLD (e.g., example.com, sub.domain.org)
     #    This last part is a bit more permissive to catch simple domain names.
-    url_pattern = re.compile(
-        r'https?://[^\s/$.?#].[^\s]*'  # Matches http:// or https:// followed by non-whitespace
-        r'|www\.[^\s/$.?#].[^\s]*'     # Matches www. followed by non-whitespace
-        r'|[a-zA-Z0-9]+\.[a-zA-Z0-9]+\.[a-zA-Z]{2,}' # Matches domain.tld or sub.domain.tld
-    )
+    
 
     # Search for the pattern in the given text
     if url_pattern.search(text):
@@ -132,8 +134,6 @@ def is_link(text):
 
 
 def extract_link(text):
-    # Regex pattern to match http, https, or www links
-    url_pattern = r'(https?://[^\s]+|www\.[^\s]+)'
     
     match = re.search(url_pattern, text)
     if match:
