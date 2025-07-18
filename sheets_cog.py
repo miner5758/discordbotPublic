@@ -4,7 +4,8 @@ from discord.ext import commands
 import re
 import os
 import time
-from google import genai
+#import google.generativeai as genai | if you are using linux
+from google import genai # if you are using windows
 from google.genai import types
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -15,20 +16,22 @@ from googleapiclient.errors import HttpError
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SPREADSHEET_ID = "1oXxHr3n1uGL2ZPcMDFiVFUQKASmQ4k5WMTlbJhrbCbI"
 RANGE_NAME = "A2:E"
-
+url_pattern = re.compile(
+        r'https?://[^\s/$.?#].[^\s]*'  # Matches http:// or https:// followed by non-whitespace
+        r'|www\.[^\s/$.?#].[^\s]*'     # Matches www. followed by non-whitespace
+        r'|[a-zA-Z0-9]+\.[a-zA-Z0-9]+\.[a-zA-Z]{2,}' # Matches domain.tld or sub.domain.tld
+)
 class SheetsCog(commands.Cog):
+    
     def __init__(self, bot):
         self.bot = bot
         self.gemkey = os.getenv("gemkey")
 
     def is_link(self, text: str) -> bool:
-        url_pattern = re.compile(
-            r'https?://[^\s/$.?#].[^\s]*|www\.[^\s/$.?#].[^\s]*|[a-zA-Z0-9]+\.[a-zA-Z0-9]+\.[a-zA-Z]{2,}'
-        )
         return bool(url_pattern.search(text))
 
     def extract_link(self, text: str) -> str:
-        match = re.search(r'(https?://[^\s]+|www\.[^\s]+)', text)
+        match = re.search(url_pattern, text)
         return match.group() if match else None
 
     def sheetsedit(self, dataa):
@@ -85,7 +88,7 @@ class SheetsCog(commands.Cog):
         content = message.content.lower()
         username = str(message.author).split("#")[0]
 
-        if channel_name != "please":
+        if channel_name != "opportunities":
             return
 
         if content == "ryan roslansky give me the link to the spreadsheet":
