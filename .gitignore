@@ -1,2 +1,5 @@
 /venv
 src/__pycache__
+resources/file.env
+token.json
+credentials.json
