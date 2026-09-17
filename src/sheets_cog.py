@@ -17,6 +17,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+import ats
 from models import Opportunity, Source, unreadable_page
 
 log = logging.getLogger(__name__)
@@ -57,11 +58,26 @@ HELP_WORDS = {"help", "commands"}
 HELP_PHRASES = ("what can you do", "what do you do")
 
 HELP_TEXT = (
-    "Here's what I do:\n"
-    "• Post a link in this channel and I'll add it to the spreadsheet.\n"
-    "• Ask me for the **sheet** or **spreadsheet** and I'll send the link.\n"
-    "• Ask me about **internships** if you need a pep talk.\n"
-    "Say my name or @ me so I know you're talking to me."
+    "**Here's what I do**\n"
+    "\n"
+    "**Add an opportunity** — just post the link in this channel. I'll read the posting "
+    "and add it to the spreadsheet. Several links in one message is fine.\n"
+    "  ⏳ working · ✅ added · ⚠️ added but I couldn't open the page · 🔁 already in the sheet · ❌ failed\n"
+    "\n"
+    "**Get the spreadsheet** — say my name and mention the sheet:\n"
+    "  `dan spreadsheet?`\n"
+    "  `shapero where's the sheet`\n"
+    "  `daniel give me the link to the spreadsheet`\n"
+    "\n"
+    "**Ask about internships** — say my name and mention internships:\n"
+    "  `dan are we getting internships?`\n"
+    "  `shapero am i gonna be rich`\n"
+    "\n"
+    "**This message** — `dan help` or `daniel what can you do`\n"
+    "\n"
+    "I answer to **dan**, **daniel**, **shapero**, close misspellings, or an @mention. "
+    "Word order and extra words don't matter, but I need both my name and what you want — "
+    "otherwise I stay quiet."
 )
 
 
@@ -170,9 +186,17 @@ class SheetsCog(commands.Cog):
         )
 
     @staticmethod
-    def build_contents(link, embed):
+    def build_contents(link, embed, posting):
         today = datetime.date.today().strftime("%B %d, %Y")
         contents = f"Today is {today}. Extract the opportunity at this URL: {link}"
+        if posting:
+            contents += (
+                f"\n\nFull posting, fetched from the {posting['system']} API "
+                f"(treat this as the page - do not fetch the URL):"
+                f"\n  Title: {posting['title']}"
+                f"\n  Location: {posting['location']}"
+                f"\n  Description: {posting['text']}"
+            )
         if embed:
             contents += "\n\nDiscord's link preview for this URL:"
             for label in ("title", "description", "site"):
@@ -180,11 +204,13 @@ class SheetsCog(commands.Cog):
                     contents += f"\n  {label.capitalize()}: {embed[label]}"
         return contents
 
-    def generate(self, link, embed):
-        contents = self.build_contents(link, embed)
+    def generate(self, link, embed, posting):
+        contents = self.build_contents(link, embed, posting)
+        # With the posting already in hand there is nothing to fetch, and leaving the
+        # tool off avoids the 503-prone tool call entirely.
         config = types.GenerateContentConfig(
             system_instruction=self.prompt,
-            tools=[types.Tool(url_context=types.UrlContext())],
+            tools=None if posting else [types.Tool(url_context=types.UrlContext())],
             response_mime_type="application/json",
             response_schema=Opportunity,
         )
@@ -203,8 +229,9 @@ class SheetsCog(commands.Cog):
                 time.sleep(20 if error.code == 429 else 2)
 
     def extract(self, link, embed=None):
+        posting = ats.resolve(link)
         try:
-            response = self.generate(link, embed)
+            response = self.generate(link, embed, posting)
         except Exception as error:
             log.exception("Gemini call failed for %s", link)
             raise ExtractionError("the extractor is unavailable right now") from error
@@ -214,9 +241,11 @@ class SheetsCog(commands.Cog):
             log.error("Unparseable response for %s: %s", link, response.text)
             raise ExtractionError("that posting couldn't be read")
 
-        # The API reports whether the fetch really succeeded; a model that claims the
-        # page anyway gets downgraded to what it could actually have seen.
-        if opportunity.source == Source.PAGE and self.retrieval_failed(response):
+        # We know what the model was given, so the source is ours to set when we
+        # supplied the posting, and to sanity-check against the fetch metadata otherwise.
+        if posting:
+            opportunity.source = Source.API
+        elif opportunity.source == Source.PAGE and self.retrieval_failed(response):
             opportunity.source = Source.EMBED if embed else Source.URL
             log.warning("Model claimed page for %s but fetch failed; using %s", link, opportunity.source.value)
 

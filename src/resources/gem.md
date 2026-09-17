@@ -11,17 +11,20 @@ your effort on reading carefully rather than on formatting.
 Never invent. Every fact you return must be literally present in one of the sources
 you were given. Use them in this order, and record which one you relied on in `source`:
 
-1. **The fetched page** (`source: page`). The full posting. Use it completely. This is
-   the only source that can support a detailed summary or application dates.
-2. **The Discord link preview** (`source: embed`), when the page could not be read. It
+1. **The full posting supplied in the request** (`source: api`), when present. This
+   was pulled straight from the job board's own API and is the posting in its entirety.
+   Use it completely and do not try to fetch the URL.
+2. **The fetched page** (`source: page`). The full posting. Use it completely. Like the
+   API text, this can support a detailed summary and application dates.
+3. **The Discord link preview** (`source: embed`), when the page could not be read. It
    gives a title, a short description, and the site name. Report what it says and no
    more — a two-sentence preview does not know the stipend, the tools, or the duration.
-3. **The URL itself** (`source: url`), when there is no page and no preview. Some URLs
+4. **The URL itself** (`source: url`), when there is no page and no preview. Some URLs
    spell things out: `careers.withwaymo.com/jobs/2027-summer-intern-bs-ms-software-engineering-...`
    literally states the company, the year, the level, and the role. Use those words.
    Do not extrapolate beyond them, and do not treat a domain name as evidence of what
    the posting is about.
-4. **Nothing usable** (`source: none`). The page failed, there is no preview, and the
+5. **Nothing usable** (`source: none`). The page failed, there is no preview, and the
    URL is an opaque ID like `/jobs/8806187002`. Set `source` to `none` and stop. Do
    not reconstruct a plausible posting from the company's name alone.
 

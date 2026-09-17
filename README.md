@@ -12,16 +12,21 @@ Post a link, get a row. The bot reacts ⏳ while it works, then ✅ when the row
 1. Someone posts a link in `#opportunities`.
 2. The bot checks the sheet and skips links that are already there, and waits a
    moment for Discord to attach its link preview to the message.
-3. Gemini gets the URL, the preview, and fetches the page with the `url_context`
-   tool, then returns a filled-in `Opportunity` object. The shape is enforced by the
-   API's response schema, not by asking the model nicely — see
-   [`src/models.py`](src/models.py).
-4. The row is appended to the sheet.
+3. If the link is hosted on Greenhouse, Ashby, or Lever, the bot pulls the full
+   posting from that system's public API — see [`src/ats.py`](src/ats.py). Those
+   careers pages are JavaScript shells that block fetchers, but the API behind them
+   is open.
+4. Gemini gets the URL, the preview, and either the API posting or a fetch of the page
+   via the `url_context` tool, then returns a filled-in `Opportunity` object. The
+   shape is enforced by the API's response schema, not by asking the model nicely —
+   see [`src/models.py`](src/models.py).
+5. The row is appended to the sheet.
 
 The model uses the richest source it has, in this order:
 
 | Source | When | What you get |
 |---|---|---|
+| api | the link is on Greenhouse, Ashby, or Lever | full posting, pay and dates if stated |
 | page | the fetch worked | full summary, dates if stated |
 | embed | page blocked, Discord's preview exists | title, role, short summary |
 | url | no page, no preview, but the URL spells out the role | name and role from the slug |
@@ -184,6 +189,7 @@ src/
   main.py                  entry point, loads the env file
   core_bot.py              client setup, registers the cog in setup_hook
   sheets_cog.py            message handling, Gemini calls, sheet writes
+  ats.py                   pulls postings from Greenhouse / Ashby / Lever APIs
   models.py                response schema and the two enums
   resources/gem.md         the extraction prompt
   scripts/init_sheet.py    one-off: wipe the sheet, write headers

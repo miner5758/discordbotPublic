@@ -31,6 +31,7 @@ class OpportunityType(str, Enum):
 
 
 class Source(str, Enum):
+    API = "api"
     PAGE = "page"
     EMBED = "embed"
     URL = "url"
