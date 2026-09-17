@@ -40,6 +40,27 @@ log (`journalctl -u discordbot`).
 If the Gemini API itself is down or rate limited, nothing is written, because retrying
 later would have worked.
 
+### Expiry
+
+Rows are deleted automatically once they have been in the sheet longer than their
+type allows, counted from `Date Added`:
+
+| Opportunity Type | Lifetime |
+|---|---|
+| Internship, Research Program | 8 months |
+| Conference / Event | 4 months |
+| everything else | 6 months |
+
+The sweep runs once a day while the bot is up, and each deletion is logged. To see
+what the next sweep would remove without touching anything:
+
+```powershell
+.venv\Scripts\python.exe src\scripts\expire.py --dry-run
+```
+
+Rows whose `Date Added` cannot be parsed are never deleted. Lifetimes live in
+[`src/expiry.py`](src/expiry.py).
+
 ### Sheet columns
 
 ```
@@ -159,19 +180,36 @@ default). Other channels are ignored.
 | 🔁 | already in the sheet |
 | ❌ | nothing written, try again later |
 
-**Talking to it** — say its name (`dan`, `daniel`, `shapero`, or a close misspelling)
-or @mention it, plus one of these, in any order and with any extra words:
+**Ask it about the sheet** — lead with its name (`dan`, `daniel`, `shapero`, a close
+misspelling, or an @mention) and ask in plain English:
 
-| Mention | It replies with |
+```
+dan which software engineering internships are open?
+dan any google roles right now?
+dan i want to work on satellites
+dan as a sophomore interested in ML, what should i apply for?
+dan what's closing soon?
+```
+
+It answers from the sheet only, with links, and says so when nothing matches (usually
+with a labeled near miss). Recommendations come with a one-line reason. Questions
+about the asker's situation — year in school, interests, experience — use whatever the
+message says; nothing is stored.
+
+**Shortcuts** that never touch Gemini:
+
+| Say | It replies with |
 |---|---|
-| `sheet`, `spreadsheet`, `excel` | the spreadsheet link |
-| `intern`, `internships`, `offer`, `hired`, `job`, `rich` | morale support |
-| `help`, `commands`, `what can you do` | this list |
+| `dan spreadsheet?`, `shapero where's the sheet` | the spreadsheet link |
+| `dan are we getting internships?` | morale support |
+| `dan help` | the help text |
 
-So `dan spreadsheet?`, `yo shapero where's the sheet`, and `@bot link pls sheet` all
-work. Both halves are required: the name alone stays silent, since the bot is named
-after a real person who comes up in conversation, and an intent word alone stays
-silent so it doesn't answer every casual mention of the sheet.
+**What stays silent.** The bot is named after a real person who comes up in
+conversation, so it only treats a message as a question when the name is in the
+first few words *and* the message reads as a request — a `?` or a word like `any`,
+`what`, `which`, `i want`, `should`. `daniel shapero posted about layoffs` and `did you
+see daniel shapero's post?` get no reply and cost no API call. As a backstop, the model
+itself stays silent if a message slips through but isn't really asking anything.
 
 A message containing a URL always goes to extraction instead, even if it also names
 the bot.
@@ -192,8 +230,11 @@ src/
   ats.py                   pulls postings from Greenhouse / Ashby / Lever APIs
   models.py                response schema and the two enums
   resources/gem.md         the extraction prompt
+  resources/ask.md         the question-answering prompt
   scripts/init_sheet.py    one-off: wipe the sheet, write headers
   scripts/test_extract.py  run extraction on URLs without Discord
+  scripts/test_ask.py      ask a question about the live sheet without Discord
+  scripts/expire.py        run one expiry sweep by hand (--dry-run to preview)
 ```
 
 ---
