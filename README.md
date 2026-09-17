@@ -71,6 +71,11 @@ A Name | B Role Type | C Opportunity Type | D Summary | E Open Date | F Close Da
 [`src/models.py`](src/models.py). Keeping them constrained is what makes the columns
 filterable; if you add a value there, it applies to new rows only.
 
+The sheet's look — frozen header, dropdowns on the type columns, colour-coded types,
+alternating rows, deadline highlighting, and a saved filter view per type group under
+**Data → Filter views** — comes from `scripts/format_sheet.py`. Run it once on a new
+sheet, and again any time you add an enum value so the dropdowns and colours pick it up.
+
 ---
 
 ## Setup
@@ -235,6 +240,7 @@ src/
   scripts/test_extract.py  run extraction on URLs without Discord
   scripts/test_ask.py      ask a question about the live sheet without Discord
   scripts/expire.py        run one expiry sweep by hand (--dry-run to preview)
+  scripts/format_sheet.py  apply the sheet's formatting (safe to re-run, never touches data)
 ```
 
 ---
