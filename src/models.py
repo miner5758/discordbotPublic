@@ -30,10 +30,17 @@ class OpportunityType(str, Enum):
     OTHER = "Other"
 
 
+class Source(str, Enum):
+    PAGE = "page"
+    EMBED = "embed"
+    URL = "url"
+    NONE = "none"
+
+
 class Opportunity(BaseModel):
-    # The schema forces every other field to be filled, so without this flag the model
-    # will invent a complete row for a page it never managed to load.
-    page_read: bool
+    # The schema forces every other field to be filled, so without an honest signal of
+    # what the model actually had, it will invent a complete row for a dead link.
+    source: Source
     name: str
     role_type: RoleType
     opportunity_type: OpportunityType
@@ -48,7 +55,7 @@ NEEDS_REVIEW = "Needs review"
 def unreadable_page():
     """Row written when the link is good but the page could not be read."""
     return Opportunity(
-        page_read=False,
+        source=Source.NONE,
         name=NEEDS_REVIEW,
         role_type=RoleType.OTHER,
         opportunity_type=OpportunityType.OTHER,

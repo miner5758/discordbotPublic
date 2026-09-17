@@ -19,17 +19,30 @@ URLS = [
 ]
 
 
+def parse_args(argv):
+    """URL... [--embed TITLE DESCRIPTION SITE] - the fake embed applies to every URL."""
+    embed = None
+    if "--embed" in argv:
+        index = argv.index("--embed")
+        title, description, site = (argv[index + 1 : index + 4] + [None] * 3)[:3]
+        embed = {"title": title, "description": description, "site": site}
+        argv = argv[:index]
+    return argv or URLS, embed
+
+
 def main():
     cog = SheetsCog(None)
+    urls, embed = parse_args(sys.argv[1:])
 
-    for url in sys.argv[1:] or URLS:
+    for url in urls:
         print("=" * 70)
         print(url)
         try:
-            result = cog.extract(url)
+            result = cog.extract(url, embed)
         except ExtractionError as error:
             print(f"  REJECTED: {error}")
             continue
+        print(f"  source:     {result.source.value}")
         print(f"  name:       {result.name}")
         print(f"  role:       {result.role_type.value}")
         print(f"  type:       {result.opportunity_type.value}")

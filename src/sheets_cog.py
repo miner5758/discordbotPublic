@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import difflib
 import logging
 import os
 import re
@@ -16,7 +17,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from models import Opportunity, unreadable_page
+from models import Opportunity, Source, unreadable_page
 
 log = logging.getLogger(__name__)
 
@@ -45,17 +46,30 @@ URL_PATTERN = re.compile(r"https?://[^\s<>\"']+|www\.[^\s<>\"']+")
 
 SHEET_LINK = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit?usp=sharing"
 
+# The bot is named after a real LinkedIn exec who gets mentioned in normal conversation,
+# so a name alone never triggers a reply - it also needs one of the intent words below.
+NAME_WORDS = {"dan", "danny", "daniel", "shapero", "shap"}
+NAME_FUZZY = ("daniel", "shapero")
+NAME_FUZZY_CUTOFF = 0.8
+SHEET_WORDS = {"sheet", "sheets", "spreadsheet", "spreadsheets", "excel"}
+INTERN_WORDS = {"intern", "interns", "internship", "internships", "offer", "offers", "hired", "job", "jobs", "rich"}
+HELP_WORDS = {"help", "commands"}
+HELP_PHRASES = ("what can you do", "what do you do")
+
+HELP_TEXT = (
+    "Here's what I do:\n"
+    "• Post a link in this channel and I'll add it to the spreadsheet.\n"
+    "• Ask me for the **sheet** or **spreadsheet** and I'll send the link.\n"
+    "• Ask me about **internships** if you need a pep talk.\n"
+    "Say my name or @ me so I know you're talking to me."
+)
+
 
 class ExtractionError(Exception):
-    """Message is shown to the user, so keep it short and plain.
+    """Transient failure - nothing is written, since a later retry would succeed.
 
-    page_unreadable separates a link we will never parse (write a placeholder row) from
-    a transient outage (write nothing, since a later retry would succeed).
+    Message is shown to the user, so keep it short and plain.
     """
-
-    def __init__(self, reason, page_unreadable=False):
-        super().__init__(reason)
-        self.page_unreadable = page_unreadable
 
 
 class SheetsCog(commands.Cog):
@@ -143,8 +157,8 @@ class SheetsCog(commands.Cog):
 
     @staticmethod
     def retrieval_failed(response):
-        # Absent metadata means the API told us nothing either way, so fall back to the
-        # model's own page_read flag rather than rejecting the row.
+        # Absent metadata means the API told us nothing either way, so trust the
+        # model's own source claim in that case.
         entries = []
         for candidate in response.candidates or []:
             metadata = getattr(candidate, "url_context_metadata", None)
@@ -155,9 +169,19 @@ class SheetsCog(commands.Cog):
             "SUCCESS" in str(getattr(entry, "url_retrieval_status", "")) for entry in entries
         )
 
-    def generate(self, link):
+    @staticmethod
+    def build_contents(link, embed):
         today = datetime.date.today().strftime("%B %d, %Y")
         contents = f"Today is {today}. Extract the opportunity at this URL: {link}"
+        if embed:
+            contents += "\n\nDiscord's link preview for this URL:"
+            for label in ("title", "description", "site"):
+                if embed.get(label):
+                    contents += f"\n  {label.capitalize()}: {embed[label]}"
+        return contents
+
+    def generate(self, link, embed):
+        contents = self.build_contents(link, embed)
         config = types.GenerateContentConfig(
             system_instruction=self.prompt,
             tools=[types.Tool(url_context=types.UrlContext())],
@@ -178,22 +202,26 @@ class SheetsCog(commands.Cog):
                 # 429 is a per-minute quota, so it needs a longer wait than a 503 spike.
                 time.sleep(20 if error.code == 429 else 2)
 
-    def extract(self, link):
+    def extract(self, link, embed=None):
         try:
-            response = self.generate(link)
+            response = self.generate(link, embed)
         except Exception as error:
             log.exception("Gemini call failed for %s", link)
             raise ExtractionError("the extractor is unavailable right now") from error
-
-        if self.retrieval_failed(response):
-            raise ExtractionError("that page couldn't be loaded", page_unreadable=True)
 
         opportunity = response.parsed
         if opportunity is None:
             log.error("Unparseable response for %s: %s", link, response.text)
             raise ExtractionError("that posting couldn't be read")
-        if not opportunity.page_read:
-            raise ExtractionError("that page couldn't be loaded", page_unreadable=True)
+
+        # The API reports whether the fetch really succeeded; a model that claims the
+        # page anyway gets downgraded to what it could actually have seen.
+        if opportunity.source == Source.PAGE and self.retrieval_failed(response):
+            opportunity.source = Source.EMBED if embed else Source.URL
+            log.warning("Model claimed page for %s but fetch failed; using %s", link, opportunity.source.value)
+
+        if opportunity.source == Source.NONE:
+            return unreadable_page()
         return opportunity
 
     # --- discord ---
@@ -212,21 +240,69 @@ class SheetsCog(commands.Cog):
         except discord.HTTPException:
             pass
 
-    async def handle_link(self, link, known, posted_by):
+    async def wait_for_embeds(self, message):
+        # Discord attaches link previews after the message event fires, via a later
+        # edit, so the embeds are almost never present when on_message runs.
+        embeds = {}
+        for delay in (1.5, 2.0):
+            await asyncio.sleep(delay)
+            try:
+                fresh = await message.channel.fetch_message(message.id)
+            except discord.HTTPException:
+                break
+            for embed in fresh.embeds:
+                if not embed.url:
+                    continue
+                embeds[self.normalize(embed.url)] = {
+                    "title": embed.title,
+                    "description": embed.description,
+                    "site": getattr(embed.provider, "name", None),
+                }
+            if embeds:
+                break
+        return embeds
+
+    async def handle_link(self, link, known, posted_by, embed=None):
         key = self.normalize(link)
         if key in known:
             return "duplicate"
-        try:
-            opportunity = await asyncio.to_thread(self.extract, link)
-            outcome = "added"
-        except ExtractionError as error:
-            if not error.page_unreadable:
-                raise
-            opportunity = unreadable_page()
-            outcome = "unfilled"
+        opportunity = await asyncio.to_thread(self.extract, link, embed)
         await asyncio.to_thread(self.append_row, opportunity, link, posted_by)
         known.add(key)
-        return outcome
+        log.info("Added %s from %s", link, opportunity.source.value)
+        return "unfilled" if opportunity.source == Source.NONE else "added"
+
+    # --- chat ---
+
+    @staticmethod
+    def words(text):
+        return set(re.findall(r"[a-z]+", text.lower()))
+
+    def addressed(self, message):
+        if self.bot and self.bot.user in message.mentions:
+            return True
+        words = self.words(message.content)
+        if words & NAME_WORDS:
+            return True
+        # Short words fuzz too easily ("dial" is one edit from "dan"), so only try the
+        # near-miss check on words long enough to plausibly be a misspelled name.
+        return any(
+            difflib.get_close_matches(word, NAME_FUZZY, n=1, cutoff=NAME_FUZZY_CUTOFF)
+            for word in words
+            if len(word) >= 5
+        )
+
+    @classmethod
+    def reply_for(cls, content, username):
+        words = cls.words(content)
+        lowered = content.lower()
+        if words & SHEET_WORDS:
+            return f"Here you go {username}: {SHEET_LINK}"
+        if words & INTERN_WORDS:
+            return "Yes, ALL of you are getting internships and are going to become rich!"
+        if words & HELP_WORDS or any(phrase in lowered for phrase in HELP_PHRASES):
+            return HELP_TEXT
+        return None
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -236,31 +312,33 @@ class SheetsCog(commands.Cog):
             return
 
         content = message.content.strip()
-        lowered = content.lower()
         username = message.author.display_name
-
-        if lowered == "daniel shapero give me the link to the spreadsheet":
-            await message.channel.send(f"Here you go {username}: {SHEET_LINK}")
-            return
-        if lowered == "daniel shapero are we getting internships?":
-            await message.channel.send(
-                "Yes, ALL of you are getting internships and are going to become rich!"
-            )
-            return
 
         # Extract from the original text: Greenhouse, Workday and Lever paths are
         # case-sensitive, so matching against a lowercased copy would corrupt them.
         links = self.find_links(content)
-        if not links:
+        if links:
+            await self.process_links(message, links, username)
             return
 
+        if not self.addressed(message):
+            return
+        reply = self.reply_for(content, username)
+        if reply:
+            await message.channel.send(reply)
+
+    async def process_links(self, message, links, username):
         await self.react(message, "⏳")
         added = unfilled = duplicates = failed = 0
         try:
-            known = await asyncio.to_thread(self.existing_links)
+            known, embeds = await asyncio.gather(
+                asyncio.to_thread(self.existing_links),
+                self.wait_for_embeds(message),
+            )
             for link in links:
                 try:
-                    result = await self.handle_link(link, known, username)
+                    embed = embeds.get(self.normalize(link))
+                    result = await self.handle_link(link, known, username, embed)
                 except ExtractionError as error:
                     failed += 1
                     await message.channel.send(f"Skipped <{link}> — {error}")

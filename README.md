@@ -10,16 +10,30 @@ Post a link, get a row. The bot reacts ⏳ while it works, then ✅ when the row
 ## How it works
 
 1. Someone posts a link in `#opportunities`.
-2. The bot checks the sheet and skips links that are already there.
-3. Gemini fetches the page with the `url_context` tool and returns a filled-in
-   `Opportunity` object. The shape is enforced by the API's response schema, not by
-   asking the model nicely — see [`src/models.py`](src/models.py).
+2. The bot checks the sheet and skips links that are already there, and waits a
+   moment for Discord to attach its link preview to the message.
+3. Gemini gets the URL, the preview, and fetches the page with the `url_context`
+   tool, then returns a filled-in `Opportunity` object. The shape is enforced by the
+   API's response schema, not by asking the model nicely — see
+   [`src/models.py`](src/models.py).
 4. The row is appended to the sheet.
 
-If the page genuinely cannot be opened (login wall, heavy JavaScript, blocked fetcher),
-the link is still recorded with the name `Needs review` so nothing gets lost. If the
-Gemini API itself is down or rate limited, nothing is written, because retrying later
-would have worked.
+The model uses the richest source it has, in this order:
+
+| Source | When | What you get |
+|---|---|---|
+| page | the fetch worked | full summary, dates if stated |
+| embed | page blocked, Discord's preview exists | title, role, short summary |
+| url | no page, no preview, but the URL spells out the role | name and role from the slug |
+| none | nothing usable | a `Needs review` row with just the link |
+
+Discord's preview matters because it comes from a different fetcher than Gemini's —
+job sites deliberately allow it so that social sharing works, so it often succeeds
+where the page fetch is blocked. Which source each row came from is in the service
+log (`journalctl -u discordbot`).
+
+If the Gemini API itself is down or rate limited, nothing is written, because retrying
+later would have worked.
 
 ### Sheet columns
 
@@ -140,12 +154,22 @@ default). Other channels are ignored.
 | 🔁 | already in the sheet |
 | ❌ | nothing written, try again later |
 
-**Phrases** — exact match, any capitalization:
+**Talking to it** — say its name (`dan`, `daniel`, `shapero`, or a close misspelling)
+or @mention it, plus one of these, in any order and with any extra words:
 
-| | |
+| Mention | It replies with |
 |---|---|
-| `daniel shapero give me the link to the spreadsheet` | replies with the sheet link |
-| `daniel shapero are we getting internships?` | morale support |
+| `sheet`, `spreadsheet`, `excel` | the spreadsheet link |
+| `intern`, `internships`, `offer`, `hired`, `job`, `rich` | morale support |
+| `help`, `commands`, `what can you do` | this list |
+
+So `dan spreadsheet?`, `yo shapero where's the sheet`, and `@bot link pls sheet` all
+work. Both halves are required: the name alone stays silent, since the bot is named
+after a real person who comes up in conversation, and an intent word alone stays
+silent so it doesn't answer every casual mention of the sheet.
+
+A message containing a URL always goes to extraction instead, even if it also names
+the bot.
 
 Duplicate detection ignores `www.`, trailing slashes, and `utm_*` parameters, so the
 same posting shared from LinkedIn or pasted directly counts once. Deleting a row makes
