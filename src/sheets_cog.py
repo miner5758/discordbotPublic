@@ -230,6 +230,11 @@ class SheetsCog(commands.Cog):
                         "Retry %d failed for %s, waiting %ds",
                         pending.attempt, pending.link, RETRY_DELAYS[pending.attempt],
                     )
+                    if pending.attempt == 1:
+                        await pending.message.channel.send(
+                            f"Still can't reach the extractor for <{pending.link}> — "
+                            f"I'll keep trying for the next half hour."
+                        )
                 continue
             except Exception:
                 log.exception("Retry crashed for %s", pending.link)
@@ -618,13 +623,11 @@ class SheetsCog(commands.Cog):
                 embed = embeds.get(self.normalize(link))
                 try:
                     result = await self.handle_link(link, known, username, embed)
-                except ExtractionError as error:
+                except ExtractionError:
+                    # Silent for now: most outages clear before the first retry, and
+                    # the queue speaks up only if this is still failing then.
                     queued += 1
                     self.queue(message, link, username, embed)
-                    await message.channel.send(
-                        f"Couldn't reach the extractor for <{link}> — {error}. "
-                        f"I'll keep trying in the background."
-                    )
                     continue
                 if result == "added":
                     added += 1
