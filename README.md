@@ -183,7 +183,13 @@ default). Other channels are ignored.
 | ✅ | row added |
 | ⚠️ | added, but the page could not be read — fill the row in by hand |
 | 🔁 | already in the sheet |
+| 🕐 | the extractor was down — queued, retried after 3, 10 and 30 minutes |
 | ❌ | nothing written, try again later |
+
+Gemini returns 503 in bursts that can last minutes. Rather than dropping a link when
+that happens, the bot holds it and retries in the background; 🕐 turns into ✅ once it
+lands. The queue lives in memory, so a restart clears it — anything still pending then
+needs reposting.
 
 **Ask it about the sheet** — lead with its name (`dan`, `daniel`, `shapero`, a close
 misspelling, or an @mention) and ask in plain English:

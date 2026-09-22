@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import difflib
 import logging
+from dataclasses import dataclass
 import os
 import re
 import time
@@ -39,11 +40,23 @@ CHANNEL_NAME = "opportunities"
 # so a failed attempt moves to the next model rather than retrying the same one.
 MODELS = [
     "gemini-3.8-flash",
-    "gemini-3.5-flash",
+    "gemini-3.6-flash",
     "gemini-3-flash-preview",
-    "gemini-3.5-flash",
+    "gemini-flash-latest",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
 ]
 RETRY_CODES = {429, 503}
+# A 503 spike outlasts a 2s pause, so back off further each time instead of burning
+# every model in a few seconds. 429 is a per-minute quota and needs longer still.
+BACKOFF_503 = [2, 5, 10, 20, 30]
+BACKOFF_429 = 20
+
+# A storm can outlast the backoff ladder above, so a link that still fails is held and
+# retried later rather than dropped. Delays are from the moment each attempt fails.
+RETRY_DELAYS = [180, 600, 1800]
+RETRY_TICK_SECONDS = 60
+PENDING = "🕐"
 
 URL_PATTERN = re.compile(r"https?://[^\s<>\"']+|www\.[^\s<>\"']+")
 
@@ -88,7 +101,8 @@ HELP_TEXT = (
     "\n"
     "**Add an opportunity** — just post the link in this channel. I'll read the posting "
     "and add it to the spreadsheet. Several links in one message is fine.\n"
-    "  ⏳ working · ✅ added · ⚠️ added but I couldn't open the page · 🔁 already in the sheet · ❌ failed\n"
+    "  ⏳ working · ✅ added · ⚠️ added but I couldn't open the page · 🔁 already in the sheet\n"
+    "  🕐 my extractor is down — I'll keep retrying for half an hour · ❌ gave up\n"
     "\n"
     "**Ask about what's in the sheet** — say my name and ask in plain English:\n"
     "  `dan which software engineering internships are open?`\n"
@@ -122,6 +136,18 @@ class ExtractionError(Exception):
     """
 
 
+@dataclass
+class Pending:
+    """A link whose extraction failed, waiting for another go."""
+
+    message: object
+    link: str
+    username: str
+    embed: object = None
+    attempt: int = 0
+    due: float = 0.0
+
+
 class SheetsCog(commands.Cog):
 
     def __init__(self, bot):
@@ -131,6 +157,7 @@ class SheetsCog(commands.Cog):
         self.gemini = genai.Client(api_key=os.environ["gemkey"])
         self._rows = None
         self._rows_at = 0.0
+        self._pending = []
 
         credentials = service_account.Credentials.from_service_account_file(
             SERVICE_ACCOUNT_FILE, scopes=SCOPES
@@ -140,9 +167,11 @@ class SheetsCog(commands.Cog):
         )
         if bot is not None:
             self.expire_rows.start()
+            self.retry_pending.start()
 
     def cog_unload(self):
         self.expire_rows.cancel()
+        self.retry_pending.cancel()
 
     # --- expiry ---
 
@@ -157,6 +186,60 @@ class SheetsCog(commands.Cog):
 
     @expire_rows.before_loop
     async def wait_for_bot(self):
+        await self.bot.wait_until_ready()
+
+    # --- retry queue ---
+
+    def queue(self, message, link, username, embed):
+        if any(p.link == link and p.message.id == message.id for p in self._pending):
+            return
+        self._pending.append(
+            Pending(message, link, username, embed, due=time.monotonic() + RETRY_DELAYS[0])
+        )
+        log.info("Queued %s for retry (%d waiting)", link, len(self._pending))
+
+    async def finish_pending(self, pending, emoji, note=None):
+        self._pending.remove(pending)
+        await self.unreact(pending.message, PENDING, self.bot.user)
+        await self.react(pending.message, emoji)
+        if note:
+            await pending.message.channel.send(note)
+
+    @tasks.loop(seconds=RETRY_TICK_SECONDS)
+    async def retry_pending(self):
+        now = time.monotonic()
+        for pending in [p for p in self._pending if p.due <= now]:
+            try:
+                known = await asyncio.to_thread(self.existing_links)
+                result = await self.handle_link(
+                    pending.link, known, pending.username, pending.embed
+                )
+            except ExtractionError:
+                pending.attempt += 1
+                if pending.attempt >= len(RETRY_DELAYS):
+                    log.warning("Giving up on %s after %d retries", pending.link, pending.attempt)
+                    await self.finish_pending(
+                        pending,
+                        "❌",
+                        f"Gave up on <{pending.link}> — the extractor stayed down. "
+                        f"Post it again whenever.",
+                    )
+                else:
+                    pending.due = time.monotonic() + RETRY_DELAYS[pending.attempt]
+                    log.info(
+                        "Retry %d failed for %s, waiting %ds",
+                        pending.attempt, pending.link, RETRY_DELAYS[pending.attempt],
+                    )
+                continue
+            except Exception:
+                log.exception("Retry crashed for %s", pending.link)
+                await self.finish_pending(pending, "❌")
+                continue
+            log.info("Retry succeeded for %s (%s)", pending.link, result)
+            await self.finish_pending(pending, "⚠️" if result == "unfilled" else "✅")
+
+    @retry_pending.before_loop
+    async def wait_for_bot_retry(self):
         await self.bot.wait_until_ready()
 
     # --- links ---
@@ -272,8 +355,10 @@ class SheetsCog(commands.Cog):
                 if error.code not in RETRY_CODES or last:
                     raise
                 log.warning("Gemini %s from %s for %s", error.code, model, label)
-                # 429 is a per-minute quota, so it needs a longer wait than a 503 spike.
-                time.sleep(20 if error.code == 429 else 2)
+                if error.code == 429:
+                    time.sleep(BACKOFF_429)
+                else:
+                    time.sleep(BACKOFF_503[min(attempt, len(BACKOFF_503) - 1)])
 
     def generate(self, link, embed, posting):
         contents = self.build_contents(link, embed, posting)
@@ -523,19 +608,23 @@ class SheetsCog(commands.Cog):
 
     async def process_links(self, message, links, username):
         await self.react(message, "⏳")
-        added = unfilled = duplicates = failed = 0
+        added = unfilled = duplicates = failed = queued = 0
         try:
             known, embeds = await asyncio.gather(
                 asyncio.to_thread(self.existing_links),
                 self.wait_for_embeds(message),
             )
             for link in links:
+                embed = embeds.get(self.normalize(link))
                 try:
-                    embed = embeds.get(self.normalize(link))
                     result = await self.handle_link(link, known, username, embed)
                 except ExtractionError as error:
-                    failed += 1
-                    await message.channel.send(f"Skipped <{link}> — {error}")
+                    queued += 1
+                    self.queue(message, link, username, embed)
+                    await message.channel.send(
+                        f"Couldn't reach the extractor for <{link}> — {error}. "
+                        f"I'll keep trying in the background."
+                    )
                     continue
                 if result == "added":
                     added += 1
@@ -562,5 +651,7 @@ class SheetsCog(commands.Cog):
             await self.react(message, "✅")
         if unfilled:
             await self.react(message, "⚠️")
-        if not (added or unfilled):
+        if queued:
+            await self.react(message, PENDING)
+        if not (added or unfilled or queued):
             await self.react(message, "🔁" if duplicates and not failed else "❌")
