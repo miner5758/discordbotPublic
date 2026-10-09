@@ -9,6 +9,7 @@ from models import OpportunityType
 log = logging.getLogger(__name__)
 
 DATE_FORMAT = "%B %d, %Y"
+RETRIES = 3
 DEFAULT_MONTHS = 6
 MONTHS_BY_TYPE = {
     OpportunityType.INTERNSHIP.value: 8,
@@ -57,7 +58,7 @@ def purge(sheets, spreadsheet_id, sheet_name="Sheet1", dry_run=False):
         sheets.spreadsheets()
         .values()
         .get(spreadsheetId=spreadsheet_id, range=f"{sheet_name}!A2:I")
-        .execute()
+        .execute(num_retries=RETRIES)
         .get("values", [])
     )
     doomed = list(expired(rows))
@@ -66,7 +67,7 @@ def purge(sheets, spreadsheet_id, sheet_name="Sheet1", dry_run=False):
     if not doomed or dry_run:
         return [(name, kind, added) for _, name, kind, added in doomed]
 
-    meta = sheets.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    meta = sheets.spreadsheets().get(spreadsheetId=spreadsheet_id).execute(num_retries=RETRIES)
     sheet_id = next(
         s["properties"]["sheetId"] for s in meta["sheets"] if s["properties"]["title"] == sheet_name
     )
@@ -86,5 +87,5 @@ def purge(sheets, spreadsheet_id, sheet_name="Sheet1", dry_run=False):
     ]
     sheets.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id, body={"requests": requests}
-    ).execute()
+    ).execute(num_retries=RETRIES)
     return [(name, kind, added) for _, name, kind, added in doomed]

@@ -10,7 +10,9 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import discord
+import httplib2
 from discord.ext import commands, tasks
+from google_auth_httplib2 import AuthorizedHttp
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
@@ -57,6 +59,11 @@ BACKOFF_429 = 20
 RETRY_DELAYS = [180, 600, 1800]
 RETRY_TICK_SECONDS = 60
 PENDING = "🕐"
+
+# Sheets reads were hanging with no timeout and taking the whole message down with
+# them. num_retries covers socket timeouts and 5xx; the timeout bounds each attempt.
+SHEETS_TIMEOUT = 30
+SHEETS_RETRIES = 3
 
 URL_PATTERN = re.compile(r"https?://[^\s<>\"']+|www\.[^\s<>\"']+")
 
@@ -162,8 +169,13 @@ class SheetsCog(commands.Cog):
         credentials = service_account.Credentials.from_service_account_file(
             SERVICE_ACCOUNT_FILE, scopes=SCOPES
         )
+        # Without an explicit timeout a stalled read hangs until the socket gives up,
+        # which is what was taking whole messages down.
         self.sheets = build(
-            "sheets", "v4", credentials=credentials, cache_discovery=False
+            "sheets",
+            "v4",
+            http=AuthorizedHttp(credentials, http=httplib2.Http(timeout=SHEETS_TIMEOUT)),
+            cache_discovery=False,
         )
         if bot is not None:
             self.expire_rows.start()
@@ -283,7 +295,7 @@ class SheetsCog(commands.Cog):
             self.sheets.spreadsheets()
             .values()
             .get(spreadsheetId=SPREADSHEET_ID, range=LINK_COLUMN_RANGE)
-            .execute()
+            .execute(num_retries=SHEETS_RETRIES)
             .get("values", [])
         )
         return {self.normalize(row[0]) for row in rows if row and row[0].strip()}
@@ -312,7 +324,7 @@ class SheetsCog(commands.Cog):
             valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS",
             body={"values": [row]},
-        ).execute()
+        ).execute(num_retries=SHEETS_RETRIES)
 
     # --- extraction ---
 
@@ -510,7 +522,7 @@ class SheetsCog(commands.Cog):
                 self.sheets.spreadsheets()
                 .values()
                 .get(spreadsheetId=SPREADSHEET_ID, range=APPEND_RANGE)
-                .execute()
+                .execute(num_retries=SHEETS_RETRIES)
                 .get("values", [])
             )
             self._rows_at = time.monotonic()
@@ -615,13 +627,20 @@ class SheetsCog(commands.Cog):
         await self.react(message, "⏳")
         added = unfilled = duplicates = failed = queued = 0
         try:
-            known, embeds = await asyncio.gather(
-                asyncio.to_thread(self.existing_links),
-                self.wait_for_embeds(message),
-            )
+            embeds = await self.wait_for_embeds(message)
+            try:
+                known = await asyncio.to_thread(self.existing_links)
+            except Exception:
+                # The dedupe read is not worth losing a link over - queue them all and
+                # let the retry loop try again once the sheet is reachable.
+                log.exception("Could not read existing links; queueing %d link(s)", len(links))
+                for link in links:
+                    self.queue(message, link, username, embeds.get(self.normalize(link)))
+                await self.react(message, PENDING)
+                return
             for link in links:
-                embed = embeds.get(self.normalize(link))
                 try:
+                    embed = embeds.get(self.normalize(link))
                     result = await self.handle_link(link, known, username, embed)
                 except ExtractionError:
                     # Silent for now: most outages clear before the first retry, and
